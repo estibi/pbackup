@@ -1,0 +1,114 @@
+#! /bin/sh
+
+# pbackup_cut
+#
+# This file is part of "pbackup" - backup tool.
+
+
+FILE_SIZE="100" # 100MB
+FILE_INPUT=""
+
+
+print_log_n()
+{
+	echo -n "$1"
+}
+
+
+
+
+
+print_log()
+{
+	echo "$1"
+}
+
+
+
+
+
+cut_file()
+{
+	again=YES
+	file_counter="1000"
+	cur_skip="0"
+	_tmp_cut_file=".tmp_cut_file"
+
+	while [ $again = "YES" ]
+	do
+		print_log "skip: $cur_skip file: $FILE_INPUT.part_$file_counter "
+
+		dd if="$FILE_INPUT" of="$FILE_INPUT.part_$file_counter" bs="1M" \
+			count=$FILE_SIZE skip="$cur_skip" \
+			2> $_tmp_cut_file
+	
+		dd_counter=`head -n 1 $_tmp_cut_file | cut -f1 -d "+"`
+
+		if [ "$dd_counter" -lt $FILE_SIZE ]; then
+			again=NO
+			if [ $dd_counter -eq "0" ]; then
+				print_log ""
+				print_log_n "block is empty, deleting ... "
+				rm -f "$FILE_INPUT.part_$file_counter"
+				print_log "ok"
+				break
+			fi
+		fi
+		file_counter=`expr $file_counter + 1`
+		cur_skip=`expr $cur_skip + $FILE_SIZE`
+	done
+
+	rm -f "$_tmp_cut_file"
+}
+
+
+
+
+
+show_help()
+{
+	echo "Help. Usage: pbackup_cut (OPTIONS) -f my_file"
+	echo "Options:"
+	echo "-s block_size_in_mb"
+	echo "-h   // show_help"
+	exit 1
+}
+
+
+
+
+
+check_cmdline()
+{
+if [ $# != "0" ]; then
+	while getopts "f:hs:" parm
+	do
+		case $parm in
+		f)	FILE_INPUT="$OPTARG";;
+		h)	show_help;;
+		s)	FILE_SIZE="$OPTARG";;
+		?)	echo "error: wrong parameter"
+			exit 1;;
+		esac
+	done
+else
+	echo "error: missing parameters"
+	exit 1
+fi
+}
+
+
+
+
+
+check_cmdline "$@"
+
+if [ -z $FILE_INPUT ] ; then
+	echo "error: Can't open file. Give me \"-f your_file\" parameter."
+	exit 1
+fi
+
+cut_file "$1"
+print_log "done"
+
+# EOF
