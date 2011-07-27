@@ -1,0 +1,1340 @@
+#! /bin/sh
+
+################################################################
+#
+#  pbackup - testing
+#
+###############################################################
+
+PROGRAM_NAME="pbackup"
+PROGRAM_VER="current"
+PROGRAM_LICENSE="CDDL"
+PROGRAM_AUTHOR="Piotr Jasiukajtis"
+
+FILE_CONF="$HOME/.pbackup_conf"
+
+PATH=$PATH:/usr:/usr/bin
+BZIP2=`which bzip2`
+OS=`uname -s`
+
+
+
+
+
+################################################################
+# defaults
+
+DIR_BACKUP="/home/BACKUP"
+DIR_NEW_BACKUP=`date '+%Y_%m_%d__%H-%M_%S'`
+
+FILE_MD5="md5"
+FILE_LOG="log"
+FILE_DIRS="$HOME/.pbackup_dirs"
+FILE_DIRS_EXCLUDE="$HOME/.pbackup_dirs_exclude"
+FILE_BR="$HOME/.pbackup_br"
+FILE_RAW="$HOME/.pbackup_raw"
+FILE_BACKUP_TYPE="dirs_type"
+
+FILE_TMP_LOG="__tmp_log"
+
+FILE_TMP_DIRS="__tmp_dirs"
+FILE_TMP_DIRS_EXCLUDE="__tmp_dirs_exclude"
+FILE_TMP_BR="__tmp_br"
+FILE_TMP_RAW="__tmp_raw"
+
+BACKUP_DIRS="YES"
+BACKUP_BR="NO"
+BACKUP_RAW="NO"
+
+USE_BZIP2="NO"
+USE_DIRS_EXCLUDE="NO"
+
+DD_BR_BS="1k"
+DD_BR_COUNT="64"
+
+UMASK="0027"
+
+SHOW_DIRS_EXCLUDE="YES"
+SHOW_FIND_LAST="YES"
+
+VERBOSE="NO"
+DEBUG="NO"
+
+
+
+
+
+################################################################
+# user defined
+
+if [ -f $FILE_CONF ]; then
+	. $FILE_CONF
+fi
+
+
+
+
+
+################################################################
+# internals
+
+STRING_LONG_LINE="##################################################"
+STRING_BT_FULL="full"
+STRING_BT_INC="inc"
+LIST_DIRS=""
+LIST_DIRS_EXCLUDE=""
+LIST_BR=""
+LIST_RAW=""
+
+USE_LIST_DIRS="NO"
+USE_LIST_DIRS_EXCLUDE="NO"
+USE_LIST_BR="NO"
+USE_LIST_RAW="NO"
+
+SHORT_OPTIONS="abBc:C:d:D:e:E:gGhHmMn:N:p:P:qrRsSt:T:vVxXyYzZ"
+
+BACKUP_TYPE="$STRING_BT_FULL"
+INCR_NEWER="NO"
+INCR_LAST="NO"
+
+_FILE_DATE="date"
+DATE_OF_BACKUP=`echo $DIR_NEW_BACKUP | cut -c '1-4,6-7,9-10'`
+
+DD_RAW_BS="1M"
+DD_RAW_COUNT="100"
+
+
+
+
+
+
+################################################################
+# functions
+
+show_variables()
+{
+	echo "Variables:"
+	echo "DIR_NEW_BACKUP=$DIR_NEW_BACKUP"
+	echo "DIR_BACKUP=$DIR_BACKUP"
+	echo "DIR_BR=$DIR_BR"
+	echo "DIR_RAW=$DIR_RAW"
+	echo "DIR_DIRS=$DIR_DIRS"
+
+	echo "FILE_MD5=$FILE_MD5"
+	echo "FILE_LOG=$FILE_LOG"
+	echo "FILE_DIRS=$FILE_DIRS"
+	echo "FILE_DIRS_EXCLUDE=$FILE_DIRS_EXCLUDE"
+	echo "FILE_BR=$FILE_BR"
+	echo "FILE_RAW=$FILE_RAW"
+	echo "FILE_BACKUP_TYPE=$FILE_BACKUP_TYPE"
+
+	echo "FILE_TMP_LOG=$FILE_TMP_LOG"
+	echo "FILE_TMP_DIRS=$FILE_TMP_DIRS"
+	echo "FILE_TMP_DIRS_EXCLUDE=$FILE_TMP_DIRS_EXCLUDE"
+	echo "FILE_TMP_BR=$FILE_TMP_BR"
+	echo "FILE_TMP_RAW=$FILE_TMP_RAW"
+
+	echo "DEBUG=$DEBUG"
+	echo "VERBOSE=$VERBOSE"
+
+	echo "BACKUP_DIRS=$BACKUP_DIRS"
+	echo "BACKUP_BR=$BACKUP_BR"
+	echo "BACKUP_RAW=$BACKUP_RAW"
+	echo "USE_BZIP2=$USE_BZIP2"
+	echo "USE_DIRS_EXCLUDE=$USE_DIRS_EXCLUDE"
+	echo "SHOW_DIRS_EXCLUDE=$SHOW_DIRS_EXCLUDE"
+	echo "SHOW_FIND_LAST=$SHOW_FIND_LAST"
+
+	echo "DD_BR_BS=$DD_BR_BS"
+	echo "DD_BR_COUNT=$DD_BR_COUNT"
+	echo "DD_RAW_BS=$DD_RAW_BS"
+	echo "DD_RAW_COUNT=$DD_RAW_COUNT"
+
+	echo "UMASK=$UMASK"
+
+	echo "INCR_LAST=$INCR_LAST"
+	echo "INCR_NEWER=$INCR_NEWER"
+}
+
+
+
+
+# get_real_path()
+#
+# input: $1 - "string", $2 - variable
+#
+# DONE:
+#	- "~"
+#	- "$HOME"
+get_real_path()
+{
+	debug_log "$FUNCNAME \$1=$1"
+	debug_log "$FUNCNAME \$2=$2"
+
+	_grp_tmp=`echo "$1" | cut -c 1`
+	debug_log "_grp_tmp=$_grp_tmp"
+
+	if [ "$_grp_tmp" = "~" ]; then
+		debug_log "OK - done"
+		eval `echo "$2"`="`dirname ~`/`basename ~`/`echo "$1" | \
+			cut -c '3-'`"
+		return
+	fi
+
+	_grp_tmp=`echo "$1" | cut -c '1-5'`
+	debug_log "_grp_tmp=$_grp_tmp"
+
+	if [ "$_grp_tmp" = "\$HOME" ]; then
+		debug_log "OK - done"
+		eval `echo "$2"`="`dirname ~`/`basename ~`/`echo "$1" | \
+			cut -c '7-'`"
+		return
+	fi
+}
+
+
+
+
+
+open_file_raw()
+{
+	if [ ! -f $FILE_RAW ]; then
+		print_log "I can't open $FILE_RAW"
+		fatal_error "Please set FILE_RAW in $FILE_CONF file!" \
+			"$FUNCNAME"
+	fi
+
+	if [ ! -s $FILE_RAW ]; then
+		fatal_error "$FILE_RAW is empty!" \
+			"$FUNCNAME"
+	fi
+
+	if [ $OS = "Linux" ]; then
+		# Linux
+		MAX_LINE_IN_FILE_RAW=`wc -l $FILE_RAW | cut -f1 -d " "`
+	else
+		# FreeBSD, DragonFlyBSD
+		MAX_LINE_IN_FILE_RAW=`wc -l $FILE_RAW | cut -c '-8'`
+	fi
+}
+
+
+
+
+
+open_file_br()
+{
+	if [ ! -f $FILE_BR ]; then
+		print_log "I can't open $FILE_BR"
+		fatal_error "Please set FILE_BR in $FILE_CONF file!" \
+			"$FUNCNAME"
+
+	fi
+
+	if [ ! -s $FILE_BR ]; then
+		fatal_error "$FILE_BR is empty!" \
+			"$FUNCNAME"
+	fi
+
+	if [ $OS = "Linux" ]; then
+		# Linux
+		MAX_LINE_IN_FILE_BR=`wc -l $FILE_BR | cut -f1 -d " "`
+	else
+		# FreeBSD, DragonFlyBSD
+		MAX_LINE_IN_FILE_BR=`wc -l $FILE_BR | cut -c '-8'`
+	fi
+}
+
+
+
+
+
+open_file_dirs()
+{
+	if [ ! -f $FILE_DIRS ]; then
+		print_log "I can't open $FILE_DIRS"
+		fatal_error "Please set FILE_DIRS in $FILE_CONF file!" \
+			"$FUNCNAME"
+	fi
+
+	if [ ! -s $FILE_DIRS ]; then
+		fatal_error "$FILE_DIRS is empty!" \
+			"$FUNCNAME"
+	fi
+
+	if [ $OS = "Linux" ]; then
+		# Linux
+		MAX_LINE_IN_FILE_DIRS=`wc -l $FILE_DIRS | cut -f1 -d " "`
+	else
+		# FreeBSD, DragonFlyBSD
+		MAX_LINE_IN_FILE_DIRS=`wc -l $FILE_DIRS | cut -c '-8'`
+	fi
+}
+
+
+
+
+
+open_file_dirs_exclude()
+{
+	if [ ! -f $FILE_DIRS_EXCLUDE ]; then
+		print_log "I can't open $FILE_DIRS_EXCLUDE"
+		fatal_error "Please set FILE_DIRS_EXCLUDE in \
+			$FILE_CONF file!" "$FUNCNAME"
+	fi
+
+	if [ ! -s $FILE_DIRS_EXCLUDE ]; then
+		fatal_error "$FILE_DIRS_EXCLUDE is empty!" \
+			"$FUNCNAME"
+	fi
+}
+
+
+
+
+
+is_verbose()
+{
+	if [ $VERBOSE = "YES" ] ; then
+        	__TAR_VERBOSE="-v"
+	else
+        	__TAR_VERBOSE=""
+	fi
+}
+
+
+
+
+
+check_cur_line_exist()
+{
+	if [ ! -e "$CUR_LINE" ]; then
+		print_log "Warning! Can't find \"$CUR_LINE\"! Skipping!"
+        	CUR_LINE_C_LIST=`expr $CUR_LINE_C_LIST + 1` > /dev/null
+		continue
+	fi
+}
+
+
+
+
+
+check_cur_line_zero()
+{
+	if [ -z "$CUR_LINE" ]; then
+        	CUR_LINE_C_LIST=`expr $CUR_LINE_C_LIST + 1` > /dev/null
+		continue
+	fi
+}
+
+
+
+
+
+check_cur_line()
+{
+	check_cur_line_zero
+	check_cur_line_exist
+}
+
+
+
+
+
+backup_br()
+{
+	print_log ""
+	print_log "$STRING_LONG_LINE"
+	print_log "Boot records:"
+	print_log "Using file $FILE_BR"
+
+	print_log "bs=$DD_BR_BS count=$DD_BR_COUNT"
+
+	CUR_LINE_C_LIST=1
+
+	while [ $CUR_LINE_C_LIST -le $MAX_LINE_IN_FILE_BR ]
+	do
+        	CUR_LINE=`head -n $CUR_LINE_C_LIST $FILE_BR | tail -n 1`
+
+		check_cur_line
+		FIXED_NAME="br_`echo $CUR_LINE | sed 's/\//___/g'`"
+
+		print_log_n "$CUR_LINE ==> $FIXED_NAME ... "
+		dd if=$CUR_LINE of="$PREFIX/$FIXED_NAME" \
+			bs=$DD_BR_BS count=$DD_BR_COUNT 2>> $PREFIX/$FILE_LOG \
+			|| fatal_error "dd 1" "$FUNCNAME"
+		print_log_n "ok, "
+		make_one_md5 "$FIXED_NAME" "br.$FILE_MD5"
+
+
+		print_log_n "$CUR_LINE ==> $FIXED_NAME~ ... "
+		dd if=$CUR_LINE of="$PREFIX/$FIXED_NAME~" \
+			bs=$DD_BR_BS count=$DD_BR_COUNT 2>> $PREFIX/$FILE_LOG \
+			|| fatal_error "dd 2" "$FUNCNAME"
+		print_log_n "ok, "
+		make_one_md5 "$FIXED_NAME~" "br.$FILE_MD5"
+
+        	CUR_LINE_C_LIST=`expr $CUR_LINE_C_LIST + 1` > /dev/null
+	done
+}
+
+
+
+
+
+backup_whole_raw_partition()
+{
+	again=YES
+	part_counter="1000"
+
+	zero=0
+	cur_skip=$zero
+
+	_tmp_log="$PREFIX/.tmp_log"
+
+	while [ $again = "YES" ]
+	do
+		print_log_n "skip: $cur_skip   file: $2.$part_counter   "
+		print_log_n "1 "
+		dd if="$1" of="$PREFIX/$2.$part_counter" bs=$DD_RAW_BS \
+			count=$DD_RAW_COUNT skip=$cur_skip 2> $_tmp_log || \
+			fatal_error "dd" "$FUNCNAME 1"
+	
+		dd_counter=`head -n 1 $_tmp_log | cut -f1 -d "+"`
+
+		if [ $dd_counter -lt $DD_RAW_COUNT ]; then
+			again=NO
+			if [ $dd_counter -eq $zero ]; then
+				echo
+				print_log_n "block is empty, deleting ... "
+				rm -f "$PREFIX/$2.$part_counter"
+				print_log "ok"
+				break
+			fi
+		fi
+
+		print_log_n "2 "
+		gzip -9 "$PREFIX/$2.$part_counter" || \
+			fatal_error "dd" "$FUNCNAME 2"
+
+		print_log_n "3 "
+		gzip -t "$PREFIX/$2.$part_counter.gz" || \
+			fatal_error "dd" "$FUNCNAME 3"
+
+		make_one_md5 "$2.$part_counter.gz" "raw.$FILE_MD5"
+	
+		part_counter=`expr $part_counter + 1`
+		cur_skip=`expr $cur_skip + $DD_RAW_COUNT`
+	done
+
+	rm -f "$_tmp_log"
+}
+
+
+
+
+
+backup_raw()
+{
+	print_log ""
+	print_log "$STRING_LONG_LINE"
+	print_log "Raw partitions:"
+	print_log "Using file $FILE_RAW"
+
+	CUR_LINE_C_LIST=1
+
+	print_log "raw_bs=$DD_RAW_BS raw_count=$DD_RAW_COUNT"
+
+	while [ $CUR_LINE_C_LIST -le $MAX_LINE_IN_FILE_RAW ]
+	do
+        	CUR_LINE=`head -n $CUR_LINE_C_LIST $FILE_RAW | tail -n 1`
+
+		check_cur_line
+
+		FIXED_NAME="raw_`echo $CUR_LINE | sed 's/\//___/g'`"
+		
+		print_log ""
+		print_log "*** partition: $CUR_LINE => $FIXED_NAME "
+		print_log "status: 1 - copying, 2 - compressing, 3 - checking"
+		
+		print_log "$FIXED_NAME"
+		
+		backup_whole_raw_partition "$CUR_LINE" "$FIXED_NAME"
+
+        	CUR_LINE_C_LIST=`expr $CUR_LINE_C_LIST + 1` > /dev/null
+	done
+}
+
+
+
+
+
+backup_dirs_nolast_intro()
+{
+	print_log ""
+	print_log "$STRING_LONG_LINE"
+	print_log "Compressing dirs:"
+
+	print_log_n "Backup type: "
+	if [ $BACKUP_TYPE = "$STRING_BT_FULL" ] ; then
+		print_log "$STRING_BT_FULL"
+		echo "$BACKUP_TYPE" > "$PREFIX/$FILE_BACKUP_TYPE"
+	else
+		print_log "incremental - since $INCR_NEWER"
+		echo "$BACKUP_TYPE" > "$PREFIX/$FILE_BACKUP_TYPE"
+	fi
+
+
+	print_log "Using file $FILE_DIRS"
+
+	if [ $USE_DIRS_EXCLUDE = "YES" ] ; then
+		EXCL="--exclude-from $FILE_DIRS_EXCLUDE"
+	
+		print_log "Using exclude file: $FILE_DIRS_EXCLUDE"
+		if [ $SHOW_DIRS_EXCLUDE = "YES" ] ; then
+			echo "Excluded:"
+			cat "$FILE_DIRS_EXCLUDE"
+		fi
+		cat "$FILE_DIRS_EXCLUDE" > $PREFIX/exclude
+	fi
+	print_log ""
+}
+
+
+
+
+
+backup_dirs_nolast_show_filename()
+{
+	COMPRESSED_FILE="dirs_`echo $CUR_LINE | sed 's/\//___/g'`"
+	print_log_n "$CUR_LINE ==> $STR_DIRS_$COMPRESSED_FILE.$FILE_EXT 1 "
+}
+
+
+
+
+
+backup_dirs_nolast()
+{
+	backup_dirs_nolast_intro
+	print_log "status: 1 - compressing, 2 - checking"
+
+	CUR_LINE_C_LIST=1
+
+	while [ $CUR_LINE_C_LIST -le $MAX_LINE_IN_FILE_DIRS ]
+	do
+        	CUR_LINE=`head -n $CUR_LINE_C_LIST $FILE_DIRS | tail -n 1`
+
+		check_cur_line_zero
+
+		get_real_path "$CUR_LINE" "CUR_LINE"
+
+		backup_dirs_nolast_show_filename
+
+		check_cur_line_exist
+
+		$TAR "$PREFIX/$COMPRESSED_FILE.$FILE_EXT" "$CUR_LINE" \
+			2>> "$PREFIX/$FILE_TMP_LOG" || fatal_error \
+			"tar" "$FUNCNAME"
+		quiet_log "`cat $PREFIX/$FILE_TMP_LOG`"
+		rm -f "$PREFIX/$FILE_TMP_LOG"
+
+		print_log_n "2 "
+		check_archive "$PREFIX/$COMPRESSED_FILE.$FILE_EXT"
+		make_one_md5 "$COMPRESSED_FILE.$FILE_EXT" "dirs.$FILE_MD5"
+
+        	CUR_LINE_C_LIST=`expr $CUR_LINE_C_LIST + 1` > /dev/null
+	done
+}
+
+
+
+
+
+backup_dirs_inc_last_intro()
+{
+	print_log ""
+	print_log "$STRING_LONG_LINE"
+	print_log "Compressing dirs:"
+
+	print_log_n "Backup type: "
+	print_log "incremental - last $INCR_LAST day(s)"
+	echo "$BACKUP_TYPE" > "$PREFIX/$FILE_BACKUP_TYPE"
+
+	print_log "Using file $FILE_DIRS"
+	print_log ""
+
+	if [ $SHOW_FIND_LAST = "YES" ] ; then
+		_V="-v"
+	else
+		_V=""
+	fi
+}
+
+
+
+
+
+backup_dirs_inc_last_make_archive()
+{
+	print_log_n "compressing ... "
+	tar -cz $_V -f "$PREFIX/$COMPRESSED_FILE.$FILE_EXT" \
+		-T "$PREFIX/$COMPRESSED_FILE.$FILE_EXT.list" \
+		2>> "$PREFIX/$FILE_TMP_LOG" || fatal_error "tar" "$FUNCNAME"
+
+	quiet_log "`cat $PREFIX/$FILE_TMP_LOG`"
+	rm -f "$PREFIX/$FILE_TMP_LOG"
+
+	print_log "ok"
+
+	print_log_n "checking ... "
+	check_archive "$PREFIX/$COMPRESSED_FILE.$FILE_EXT"
+	print_log "ok"
+
+	make_one_md5 "$COMPRESSED_FILE.$FILE_EXT" "dirs.$FILE_MD5"
+}
+
+
+
+
+
+backup_dirs_inc_last()
+{
+	backup_dirs_inc_last_intro
+	CUR_LINE_C_LIST=1
+
+	while [ $CUR_LINE_C_LIST -le $MAX_LINE_IN_FILE_DIRS ]
+	do
+        	CUR_LINE=`head -n $CUR_LINE_C_LIST $FILE_DIRS | tail -n 1`
+
+		check_cur_line_zero
+		get_real_path "$CUR_LINE" "CUR_LINE"
+
+		COMPRESSED_FILE="dirs_`echo $CUR_LINE | sed 's/\//___/g'`"
+
+		print_log "$CUR_LINE ==> $STR_DIRS_$COMPRESSED_FILE.$FILE_EXT:"
+		check_cur_line_exist
+
+		print_log_n "finding files ... "
+		find "$CUR_LINE" -type f -mtime -$INCR_LAST -print > \
+			"$PREFIX/$COMPRESSED_FILE.$FILE_EXT.list"
+		print_log "ok"
+			
+		if [ ! -s "$PREFIX/$COMPRESSED_FILE.$FILE_EXT.list" ] ; then
+			print_log "no newer files, skipping"
+			rm -f "$PREFIX/$COMPRESSED_FILE.$FILE_EXT.list"
+
+	        	CUR_LINE_C_LIST=`expr $CUR_LINE_C_LIST + 1` > /dev/null
+			continue
+		fi
+
+		backup_dirs_inc_last_make_archive
+        	CUR_LINE_C_LIST=`expr $CUR_LINE_C_LIST + 1` > /dev/null
+	done
+}
+
+
+
+
+
+prepare_directory()
+{
+	if [ -x $PREFIX ]; then
+		echo "$PREFIX exists"
+		exit 11
+	fi
+
+	mkdir -p $PREFIX || exit 1
+	print_log "new backup directory: $PREFIX"
+	
+}
+
+
+
+
+
+# check_archive()
+# $1 - tar file
+#
+check_archive()
+{
+	if [ "$VERBOSE" = "YES" ] ; then
+		$TAR_CHK "$1" || fatal_error "tar" "$FUNCNAME 1"
+	else
+		$TAR_CHK "$1" > /dev/null || \
+			fatal_error "tar" "$FUNCNAME 2"
+	fi
+}
+
+
+
+
+
+# make_one_md5()
+# $1 - file, $2 - md5 file
+make_one_md5()
+{
+	_pwd=`/bin/pwd`
+	cd $PREFIX
+
+	print_log_n "md5 ... "
+	if [ "$OS" = "Linux" ]; then
+		# Linux
+		md5sum "$1" >> "$2" || fatal_error "!" "$FUNCNAME"
+	else
+		# FreeBSD, DragonFlyBSD	
+		md5 "$1" >> "$2" || fatal_error "!" "$FUNCNAME"
+	fi
+
+	cd $_pwd
+	print_log "ok"
+}
+
+
+
+
+
+set_suffix_and_tar_opts()
+{
+       	print_log "$STRING_LONG_LINE"
+
+	if [ $USE_DIRS_EXCLUDE = "YES" ]; then
+		__TAR_EXCLUDE="--exclude-from $FILE_DIRS_EXCLUDE"
+	else
+		__TAR_EXCLUDE=""
+	fi
+
+	if [ $USE_BZIP2 = "YES" ] ; then
+        	print_log "using $BZIP2"
+        	print_log "Use suffix: *.tar.bz2"
+        	FILE_EXT=tar.bz2
+		__TAR_COMPRESS="--use-compress-program $BZIP2"
+		__TAR_DECOMPRESS="-j"
+	else 
+		print_log "Use suffix: *.tar.gz"
+        	FILE_EXT=tar.gz
+		__TAR_COMPRESS="-z"
+		__TAR_DECOMPRESS="-z"
+	fi
+
+	if [ ! $INCR_NEWER = "NO" ]; then
+		__TAR_INCR="--newer $INCR_NEWER"
+	fi
+
+
+	TAR="tar -c $__TAR_EXCLUDE $__TAR_INCR $__TAR_COMPRESS \
+		$__TAR_VERBOSE -f"
+	TAR_CHK="tar -t $__TAR_VERBOSE $__TAR_DECOMPRESS -f"
+}
+
+
+
+
+
+show_help()
+{
+	echo "Usage: $0 [OPTIONS]"
+	echo
+	echo "OPTIONS:"
+	echo "-a                        backup type = full"
+	echo "-b                        use bzip2"
+	echo "-B                        use gzip"
+	echo "-c /my_backup             set DIR_BACKUP"
+	echo "-C new_backup             set DIR_NEW_BACKUP"
+	echo "-d my_file_dirs.txt       set FILE_DIRS"
+	echo "-D \"~/bin /opt\"           list of directories"
+	echo "-e dirs_exclude.txt       path to FILE_DIRS_EXCLUDE"
+	echo "-E \"*.old\"                exclude from backup"
+	echo "-g                        DEBUG=YES"
+	echo "-G                        DEBUG=NO"
+	echo "-h                        show help"
+	echo "-H                        show variables"
+	echo "-m                        BACKUP_DIRS=YES"  
+	echo "-M                        BACKUP_DIRS=NO"  
+	echo "-n 20050720               incremental, newer than 2005-07-20"
+	echo "-N 5                      incremental, last 5 days"
+	echo "           With this option, exclude file doesn't work!!!"
+	echo
+	echo "-p br.txt                 path to FILE_BR"
+	echo "-P \"/dev/hda /dev/hdb\"    list of boot records"
+	echo "-q                        quiet"
+	echo "-r                        BACKUP_RAW=YES"
+	echo "-R                        BACKUP_RAW=NO"
+	echo "-s                        BACKUP_BR=YES"
+	echo "-S                        BACKUP_BR=NO"
+	echo "-t my_partitions.txt      path to FILE_RAW"
+	echo "-T \"/dev/hda4 /dev/hdb2\"  list of partitions"
+	echo "-v                        verbose"
+	echo "-V                        show version"
+	echo "-x                        USE_DIRS_EXCLUDE=YES"
+	echo "-X                        USE_DIRS_EXCLUDE=NO"
+	echo "-y                        SHOW_DIRS_EXCLUDE=YES"
+	echo "-Y                        SHOW_DIRS_EXCLUDE=NO"
+	echo "-z                        SHOW_FIND_LAST=YES"
+	echo "-Z                        SHOW_FIND_LAST=NO"
+	echo
+	echo "license: $PROGRAM_LICENSE"
+	echo "author: $PROGRAM_AUTHOR"
+}
+
+
+
+
+
+check_for_file_if_backup_br()
+{
+	if [ $BACKUP_BR = "YES" ] ; then
+		open_file_br
+	fi
+}
+
+
+
+
+
+check_for_file_if_backup_dirs()
+{
+	if [ $BACKUP_DIRS = "YES" ] ; then
+		if [ $USE_DIRS_EXCLUDE = "YES" ] ; then
+			open_file_dirs_exclude
+		fi
+		open_file_dirs
+	fi
+}
+
+
+
+
+
+check_for_file_if_backup_raw()
+{
+	if [ $BACKUP_RAW = "YES" ] ; then
+		open_file_raw
+	fi
+}
+
+
+
+
+
+is_backup_dirs()
+{
+	if [ ! $BACKUP_DIRS = "YES" ] ; then
+		return
+	fi
+
+
+	if [ $USE_DIRS_EXCLUDE = "YES" ] ; then
+		open_file_dirs_exclude
+	fi
+
+
+	if [ $BACKUP_TYPE = "$STRING_BT_FULL" ] || [ ! $INCR_NEWER = "NO" ]
+	then
+		backup_dirs_nolast
+	else
+		backup_dirs_inc_last
+	fi
+}
+
+
+
+
+
+is_backup_raw()
+{
+	if [ $BACKUP_RAW = "YES" ] ; then
+		backup_raw
+	fi
+}
+
+
+
+
+
+is_backup_br()
+{
+	if [ $BACKUP_BR = "YES" ] ; then
+		backup_br
+	fi
+}
+
+
+
+
+
+print_log()
+{
+	echo "$1"
+	echo "$1" >> "$PREFIX/$FILE_LOG"
+}
+
+
+
+
+
+print_log_n()
+{
+	echo -n "$1"
+	echo -n "$1" >> "$PREFIX/$FILE_LOG"
+}
+
+
+
+
+
+fatal_error()
+{
+	print_log "!!! Error:"
+	print_log "$1"
+	if [ -n "$2" ]; then
+		print_log "Function: $2()"
+	fi
+	exit 10
+}
+
+
+
+
+
+fatal_error_nolog()
+{
+	echo "!!! Error:"
+	echo "$1"
+	if [ -n "$2" ]; then
+		echo "Function: $2()"
+	fi
+	exit 10
+}
+
+
+
+
+
+quiet_log()
+{
+	echo "$1" >> "$PREFIX/$FILE_LOG"
+}
+
+
+
+
+
+compress_file_log()
+{
+	echo -n "Compressing $PREFIX/$FILE_LOG ... "
+	cp "$PREFIX/$FILE_LOG" "$PREFIX/$FILE_LOG~"
+	gzip -9 "$PREFIX/$FILE_LOG" || fatal_error_nolog "gzip" "$FUNCNAME"
+	gzip -t "$PREFIX/$FILE_LOG.gz" || \
+		fatal_error_nolog "gzip -t" "$FUNCNAME"
+
+	gzip -9 "$PREFIX/$FILE_LOG~" || fatal_error_nolog "gzip" "$FUNCNAME"
+	gzip -t "$PREFIX/$FILE_LOG~.gz" || \
+		fatal_error_nolog "gzip -t" "$FUNCNAME"
+	echo "ok"
+}
+
+
+
+
+
+debug_log()
+{
+	if [ $DEBUG = "NO" ]; then
+		return
+	fi
+
+	echo
+	echo "DEBUG:"
+	echo "$1"
+	echo
+}
+
+
+
+
+
+cannot_umask()
+{
+	echo "Cannot umask: $UMASK"
+	exit 12
+}
+
+
+
+
+
+param_set_file_dirs()
+{
+	slash=`echo "$1" | cut -c 1`
+	if [ "$slash" = "/" ]; then
+		FILE_DIRS="$1"
+		break
+	fi
+	FILE_DIRS="`/bin/pwd`/$1"
+}
+
+
+
+
+
+param_set_file_br()
+{
+	slash=`echo "$1" | cut -c 1`
+	if [ $slash = "/" ]; then
+		FILE_BR="$1"
+		break
+	fi
+	FILE_BR="`/bin/pwd`/$1"
+}
+
+
+
+
+
+param_set_file_raw()
+{
+	slash=`echo "$1" | cut -c 1`
+	if [ $slash = "/" ]; then
+		FILE_RAW="$1"
+		break
+	fi
+	FILE_RAW="`/bin/pwd`/$1"
+}
+
+
+
+
+
+param_set_file_dirs_exclude()
+{
+	slash=`echo "$1" | cut -c 1`
+	if [ $slash = "/" ]; then
+		FILE_DIRS_EXCLUDE="$1"
+		break
+	fi
+	FILE_DIRS_EXCLUDE="`/bin/pwd`/$1"
+}
+
+
+
+
+
+param_show_help()
+{
+	show_help
+	exit 0
+}
+
+
+
+
+
+param_show_variables()
+{
+	show_variables
+	exit 0
+}
+
+
+
+
+
+param_get_error()
+{
+	echo "Bad options, or missing parameters!"
+	exit 1
+}
+
+
+
+
+
+# make_tmp_file()
+# $1 - file, $2 - list
+make_tmp_file()
+{
+	debug_log "$FUNCNAME \$1=$1   \$2=$2"
+
+	__MTF_FILE="$1"
+	rm -f "$__MTF_FILE"
+
+	eval set -- "$2"
+
+	while [ -n "$1" ]
+	do
+		echo "$1" >> "$__MTF_FILE"
+		shift
+	done
+	debug_log "$FUNCNAME `cat $__MTF_FILE`"
+}
+
+
+
+
+
+my_pbackup()
+{
+	if [ $USE_LIST_BR = "YES" ]; then
+		make_tmp_file "$PREFIX/$FILE_TMP_BR" "$LIST_BR"
+		FILE_BR="$PREFIX/$FILE_TMP_BR"
+	fi
+	check_for_file_if_backup_br
+
+	if [ $USE_LIST_DIRS = "YES" ]; then
+		make_tmp_file "$PREFIX/$FILE_TMP_DIRS" "$LIST_DIRS"
+		FILE_DIRS="$PREFIX/$FILE_TMP_DIRS"
+	fi
+	if [ $USE_LIST_DIRS_EXCLUDE = "YES" ]; then
+		make_tmp_file "$PREFIX/$FILE_TMP_DIRS_EXCLUDE" \
+			"$LIST_DIRS_EXCLUDE"
+		FILE_DIRS_EXCLUDE="$PREFIX/$FILE_TMP_DIRS_EXCLUDE"
+	fi
+	check_for_file_if_backup_dirs
+
+	if [ $USE_LIST_RAW = "YES" ]; then
+		make_tmp_file "$PREFIX/$FILE_TMP_RAW" "$LIST_RAW"
+		FILE_RAW="$PREFIX/$FILE_TMP_RAW"
+	fi
+	check_for_file_if_backup_raw
+
+	is_backup_br
+
+	set_suffix_and_tar_opts
+	is_backup_dirs
+	is_backup_raw
+}
+
+
+
+
+
+param_get_list_dirs()
+{
+	debug_log "$FUNCNAME \$1=$1"
+	LIST_DIRS="$1"
+	debug_log "$FUNCNAME LIST_DIRS=$LIST_DIRS"
+	USE_LIST_DIRS="YES"
+}
+
+
+
+
+
+param_get_list_br()
+{
+	LIST_BR="$1"
+	USE_LIST_BR="YES"
+}
+
+
+
+
+
+param_get_list_dirs_exclude()
+{
+	LIST_DIRS_EXCLUDE="$1"
+	USE_LIST_DIRS_EXCLUDE="YES"
+	USE_DIRS_EXCLUDE="YES"
+}
+
+
+
+
+
+param_get_list_raw()
+{
+	LIST_RAW="$1"
+	USE_LIST_RAW="YES"
+}
+
+
+
+
+
+param_set_dir_backup()
+{
+	slash=`echo "$1" | cut -c 1`
+	if [ $slash = "/" ]; then
+		DIR_BACKUP="$1"
+	else
+		DIR_BACKUP="`/bin/pwd`/$1"
+	fi
+}
+
+
+
+
+
+param_set_incr_newer()
+{
+	_tmp_psin=`echo "$1" | wc -L`
+	if [ "$_tmp_psin" -ne 8 ] ; then
+		echo "error: illegal date - size"
+		exit 2
+	fi
+
+	_tmp_psin=`echo "$1" | cut -c '5-6'`
+	if [ "$_tmp_psin" -gt 12 ] ; then
+		echo "error: illegal date - month"
+		exit 2
+	fi
+
+	# TODO:
+	_tmp_psin=`echo "$1" | cut -c '5-6'`
+	if [ "$_tmp_psin" -gt 31 ] ; then
+		echo "error: illegal date - day"
+		exit 2
+	fi
+
+	INCR_NEWER="$1"
+	INCR_LAST="NO"
+	BACKUP_TYPE="$STRING_BT_INC"
+}
+
+
+
+
+
+param_set_incr_last()
+{
+	INCR_LAST="$1"
+	INCR_NEWER="NO"
+	BACKUP_TYPE="$STRING_BT_INC"
+}
+
+
+
+
+
+param_set_backup_type_full()
+{
+	INCR_NEWER="NO"
+	INCR_LAST="NO"
+	BACKUP_TYPE="$STRING_BT_FULL"
+}
+
+
+
+
+
+set_prefix()
+{
+	if [ $BACKUP_TYPE = "$STRING_BT_FULL" ] ; then
+		PREFIX="$DIR_BACKUP/$DIR_NEW_BACKUP-$BACKUP_TYPE"
+		return
+	fi
+
+	echo "INCR_NEWER=$INCR_NEWER"
+
+	# $BACKUP_TYPE = "$STRING_BT_INC"
+	if [ ! $INCR_NEWER = "NO" ] ; then
+		PREFIX="$DIR_BACKUP/$DIR_NEW_BACKUP-$BACKUP_TYPE-$INCR_NEWER"
+		return
+	fi
+	PREFIX="$DIR_BACKUP/$DIR_NEW_BACKUP-$BACKUP_TYPE-last-$INCR_LAST"
+}
+
+
+
+
+
+touch_all_done()
+{
+	touch "$PREFIX/.all_done"
+	if [ $? = "1" ] ; then
+		echo "error: touch"
+		exit 11
+	else
+		echo "Done"
+		exit 1
+	fi
+}
+
+
+
+
+
+parse_command_line()
+{
+if [ $# != "0" ]; then
+	while getopts $SHORT_OPTIONS parm
+	do
+		case $parm in
+		a)	param_set_backup_type_full;;
+		b)	USE_BZIP2="YES";;
+		B)	USE_BZIP2="NO";;
+		c)	param_set_dir_backup "$OPTARG";;
+		C)	DIR_NEW_BACKUP="$OPTARG";;
+		d)	param_set_file_dirs "$OPTARG";;
+		D)	param_get_list_dirs "$OPTARG";;
+ 		e)	param_set_file_dirs_exclude "$OPTARG";;
+		E)	param_get_list_dirs_exclude "$OPTARG";;
+		g)	DEBUG="YES";;
+		G)	DEBUG="NO";;
+		h)	param_show_help;;
+		H)	param_show_variables;;
+		m)	BACKUP_DIRS="YES";;
+		M)	BACKUP_DIRS="NO";;
+		n)	param_set_incr_newer "$OPTARG";;
+		N)	param_set_incr_last "$OPTARG";;
+		p)	param_set_file_br "$OPTARG";;
+		P)	param_get_list_br "$OPTARG";;
+		q)	VERBOSE="NO";;
+		r)	BACKUP_RAW="YES";;
+		R)	BACKUP_RAW="NO";;
+		s)	BACKUP_BR="YES";;
+		S)	BACKUP_BR="NO";;
+		t)	param_set_file_raw "$OPTARG";;
+		T)	param_get_list_raw "$OPTARG";;
+		v)	VERBOSE="YES";;
+		V)	exit 1;;
+		x)	USE_DIRS_EXCLUDE="YES";;
+		X)	USE_DIRS_EXCLUDE="NO";;
+		y)	SHOW_DIRS_EXCLUDE="YES";;
+		Y)	SHOW_DIRS_EXCLUDE="NO";;
+		z)	SHOW_FIND_LAST="YES";;
+		Z)	SHOW_FIND_LAST="NO";;
+		?)	param_get_error;;
+		esac
+	done
+fi
+}
+
+
+
+
+
+################################################################
+# begin
+
+echo "$PROGRAM_NAME version $PROGRAM_VER"
+echo
+	
+parse_command_line "$@"
+
+is_verbose
+
+umask $UMASK || cannot_umask
+
+set_prefix
+
+prepare_directory
+
+quiet_log "$PROGRAM_NAME version $PROGRAM_VER"
+quiet_log "license: $PROGRAM_LICENSE"
+quiet_log "author: $PROGRAM_AUTHOR"
+
+print_log ""
+print_log "Date of backup: $DIR_NEW_BACKUP"
+
+echo "$DATE_OF_BACKUP" > "$PREFIX/$_FILE_DATE"
+
+my_pbackup
+
+print_log ""
+compress_file_log
+
+touch_all_done
+
+# EOF
