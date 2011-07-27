@@ -1,0 +1,117 @@
+#! /bin/sh
+
+################################################################
+#
+#  pbackup_raw_restore
+#
+###############################################################
+
+PROGRAM_NAME="pbackup_raw_restore"
+PROGRAM_VER="0.1"
+PROGRAM_LICENSE="CDDL"
+PROGRAM_AUTHOR="Piotr Jasiukajtis"
+
+FILE_CONF="$HOME/.pbackup_conf"
+
+PATH=$PATH:/usr:/usr/bin
+OS=`uname -s`
+
+
+
+
+
+################################################################
+# defaults
+
+FILE_MD5="md5"
+FILE_LOG="log"
+FILE_RAW="$HOME/.pbackup_raw"
+
+VERBOSE="NO"
+
+DD_RAW_BS="1M"
+DD_RAW_COUNT="100"
+
+UMASK="0027"
+
+show_help()
+{
+	echo "Usage: pbackup_raw_restore source destination"
+	echo
+	echo "Example:"
+	echo "   > pbackup_raw_restore raw____dev___hda4 /dev/hda4"
+}
+
+error_in_source()
+{
+	echo "Error in source!!!"
+	exit 1
+}
+
+
+restore()
+{
+	echo "Restoring ${SOURCE}.* to ${DESTINATION} ... "
+	
+	zero=0
+	cur_seek=${zero}
+
+	for i in ${SOURCE}.*
+	do
+		echo -n "${i} seek: ${cur_seek} ... "
+		gzip -dc "${i}" | dd of=${DESTINATION} conv=notrunc	\
+			bs=${DD_RAW_BS} seek=${cur_seek} 2> /dev/null
+		echo "ok"	
+		
+		let "cur_seek = cur_seek + DD_RAW_COUNT"
+	done
+}
+
+
+
+
+
+check_source()
+{
+	echo "Checking source:"
+	for i in ${SOURCE}.*
+	do
+		echo -n "${i} ... "
+		gzip -t "${i}" || error_in_source
+		echo "ok"
+	done
+}
+
+set_dd()
+{
+# TODO
+#	DD_RAW_BS=`cat DD_RAW_BS`
+#	DD_RAW_COUNT=`cat DD_RAW_COUNT`
+
+	echo -n "DD_RAW_BS=${DD_RAW_BS}   "
+	echo "DD_RAW_COUNT=${DD_RAW_COUNT}"
+}
+
+
+echo "${PROGRAM_NAME} version ${PROGRAM_VER}"
+echo
+
+if [ "${#}" != 2 ]; then
+	show_help
+	exit 1
+fi
+
+SOURCE="${1}"
+DESTINATION="${2}"
+
+echo "source=${SOURCE}"
+echo "destination=${DESTINATION}"
+
+
+check_source
+set_dd
+restore
+
+echo 
+echo "ok"
+
